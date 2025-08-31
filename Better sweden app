@@ -1,0 +1,1814 @@
+# CleanSweden App - Complete Code Documentation
+
+## Overview
+CleanSweden is a gamified environmental web app where users compete to make Swedish cities cleaner by reporting cleanup activities, uploading photo proof, and earning points. The app features an interactive map, personal GPS tracking, real camera functionality, and a real-time leaderboard.
+
+## Architecture
+
+### Tech Stack
+- **Frontend**: React + TypeScript + Vite
+- **Backend**: Express.js + TypeScript  
+- **UI**: Shadcn/ui + Tailwind CSS
+- **State Management**: TanStack Query
+- **Database**: In-memory storage (easily swappable to PostgreSQL)
+- **Maps**: Leaflet.js
+- **Camera**: WebRTC Media Capture API
+
+---
+
+## Database Schema & Types
+
+### `shared/schema.ts`
+```typescript
+import { sql } from "drizzle-orm";
+import { pgTable, text, varchar, integer, timestamp, boolean } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+
+export const users = pgTable("users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  username: text("username").notNull().unique(),
+  password: text("password").notNull(),
+  points: integer("points").notNull().default(0),
+});
+
+export const cities = pgTable("cities", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull().unique(),
+  region: text("region").notNull(),
+  latitude: text("latitude").notNull(),
+  longitude: text("longitude").notNull(),
+  totalPoints: integer("total_points").notNull().default(0),
+  lastActivity: timestamp("last_activity"),
+});
+
+export const activities = pgTable("activities", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  cityId: varchar("city_id").notNull(),
+  description: text("description").notNull(),
+  points: integer("points").notNull(),
+  photoUrl: text("photo_url"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertUserSchema = createInsertSchema(users).pick({
+  username: true,
+  password: true,
+});
+
+export const insertCitySchema = createInsertSchema(cities).omit({
+  id: true,
+  totalPoints: true,
+  lastActivity: true,
+});
+
+export const insertActivitySchema = createInsertSchema(activities).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof users.$inferSelect;
+export type InsertCity = z.infer<typeof insertCitySchema>;
+export type City = typeof cities.$inferSelect;
+export type InsertActivity = z.infer<typeof insertActivitySchema>;
+export type Activity = typeof activities.$inferSelect;
+
+export type CityWithRank = City & {
+  rank: number;
+};
+```
+
+---
+
+## Backend Implementation
+
+### `server/storage.ts` - In-Memory Data Storage
+```typescript
+import { type User, type InsertUser, type City, type InsertCity, type Activity, type InsertActivity, type CityWithRank } from "@shared/schema";
+import { randomUUID } from "crypto";
+
+export interface IStorage {
+  // User methods
+  getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  
+  // City methods
+  getCities(): Promise<CityWithRank[]>;
+  getCity(id: string): Promise<City | undefined>;
+  getCityByName(name: string): Promise<City | undefined>;
+  createCity(city: InsertCity): Promise<City>;
+  updateCityPoints(cityId: string, additionalPoints: number): Promise<City | undefined>;
+  
+  // Activity methods
+  getActivitiesByCity(cityId: string, limit?: number): Promise<Activity[]>;
+  createActivity(activity: InsertActivity): Promise<Activity>;
+  getAllActivities(): Promise<Activity[]>;
+}
+
+export class MemStorage implements IStorage {
+  private users: Map<string, User>;
+  private cities: Map<string, City>;
+  private activities: Map<string, Activity>;
+
+  constructor() {
+    this.users = new Map();
+    this.cities = new Map();
+    this.activities = new Map();
+    
+    // Initialize with Swedish cities
+    this.initializeCities();
+  }
+
+  private async initializeCities() {
+    const swedishCities = [
+      { name: "Stockholm", region: "Stockholm County", latitude: "59.3293", longitude: "18.0686" },
+      { name: "Gothenburg", region: "Västra Götaland County", latitude: "57.7089", longitude: "11.9746" },
+      { name: "Malmö", region: "Skåne County", latitude: "55.6050", longitude: "13.0038" },
+      { name: "Uppsala", region: "Uppsala County", latitude: "59.8586", longitude: "17.6389" },
+      { name: "Västerås", region: "Västmanland County", latitude: "59.6162", longitude: "16.5528" },
+      { name: "Örebro", region: "Örebro County", latitude: "59.2741", longitude: "15.2066" },
+      { name: "Linköping", region: "Östergötland County", latitude: "58.4108", longitude: "15.6214" },
+      { name: "Helsingborg", region: "Skåne County", latitude: "56.0465", longitude: "12.6945" },
+    ];
+
+    for (const cityData of swedishCities) {
+      await this.createCity(cityData);
+    }
+  }
+
+  async getUser(id: string): Promise<User | undefined> {
+    return this.users.get(id);
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.username === username,
+    );
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const id = randomUUID();
+    const user: User = { ...insertUser, id, points: 0 };
+    this.users.set(id, user);
+    return user;
+  }
+
+  async getCities(): Promise<CityWithRank[]> {
+    const citiesArray = Array.from(this.cities.values());
+    const sortedCities = citiesArray.sort((a, b) => b.totalPoints - a.totalPoints);
+    
+    return sortedCities.map((city, index) => ({
+      ...city,
+      rank: index + 1,
+    }));
+  }
+
+  async getCity(id: string): Promise<City | undefined> {
+    return this.cities.get(id);
+  }
+
+  async getCityByName(name: string): Promise<City | undefined> {
+    return Array.from(this.cities.values()).find(
+      (city) => city.name === name,
+    );
+  }
+
+  async createCity(insertCity: InsertCity): Promise<City> {
+    const id = randomUUID();
+    const city: City = { 
+      ...insertCity, 
+      id, 
+      totalPoints: 0,
+      lastActivity: null 
+    };
+    this.cities.set(id, city);
+    return city;
+  }
+
+  async updateCityPoints(cityId: string, additionalPoints: number): Promise<City | undefined> {
+    const city = this.cities.get(cityId);
+    if (!city) return undefined;
+
+    const updatedCity: City = {
+      ...city,
+      totalPoints: city.totalPoints + additionalPoints,
+      lastActivity: new Date(),
+    };
+    
+    this.cities.set(cityId, updatedCity);
+    return updatedCity;
+  }
+
+  async getActivitiesByCity(cityId: string, limit = 10): Promise<Activity[]> {
+    const cityActivities = Array.from(this.activities.values())
+      .filter(activity => activity.cityId === cityId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+    
+    return cityActivities;
+  }
+
+  async createActivity(insertActivity: InsertActivity): Promise<Activity> {
+    const id = randomUUID();
+    const activity: Activity = {
+      ...insertActivity,
+      id,
+      createdAt: new Date(),
+      photoUrl: insertActivity.photoUrl || null,
+    };
+    
+    this.activities.set(id, activity);
+    
+    // Update city points and last activity
+    await this.updateCityPoints(insertActivity.cityId, insertActivity.points);
+    
+    return activity;
+  }
+
+  async getAllActivities(): Promise<Activity[]> {
+    return Array.from(this.activities.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+}
+
+export const storage = new MemStorage();
+```
+
+### `server/routes.ts` - API Endpoints
+```typescript
+import express, { type Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { insertActivitySchema } from "@shared/schema";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+
+// Configure multer for file uploads
+const uploadDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: uploadDir,
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  }
+});
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Get all cities with rankings
+  app.get("/api/cities", async (req, res) => {
+    try {
+      const cities = await storage.getCities();
+      res.json(cities);
+    } catch (error) {
+      console.error("Error fetching cities:", error);
+      res.status(500).json({ error: "Failed to fetch cities" });
+    }
+  });
+
+  // Get specific city details
+  app.get("/api/cities/:id", async (req, res) => {
+    try {
+      const city = await storage.getCity(req.params.id);
+      if (!city) {
+        return res.status(404).json({ error: "City not found" });
+      }
+      res.json(city);
+    } catch (error) {
+      console.error("Error fetching city:", error);
+      res.status(500).json({ error: "Failed to fetch city" });
+    }
+  });
+
+  // Get activities for a specific city
+  app.get("/api/cities/:id/activities", async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
+      const activities = await storage.getActivitiesByCity(req.params.id, limit);
+      res.json(activities);
+    } catch (error) {
+      console.error("Error fetching activities:", error);
+      res.status(500).json({ error: "Failed to fetch activities" });
+    }
+  });
+
+  // Create new cleanup activity
+  app.post("/api/activities", upload.single('photo'), async (req, res) => {
+    try {
+      const activityData = {
+        userId: req.body.userId || "anonymous-user",
+        cityId: req.body.cityId,
+        description: req.body.description,
+        points: parseInt(req.body.points),
+        photoUrl: req.file ? `/uploads/${req.file.filename}` : null,
+      };
+
+      // Validate the activity data
+      const validatedData = insertActivitySchema.parse(activityData);
+      
+      const activity = await storage.createActivity(validatedData);
+      res.json(activity);
+    } catch (error) {
+      console.error("Error creating activity:", error);
+      if (error instanceof Error) {
+        res.status(400).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: "Failed to create activity" });
+      }
+    }
+  });
+
+  // Serve uploaded images
+  app.use('/uploads', express.static(uploadDir));
+
+  // Get all activities (for global feed)
+  app.get("/api/activities", async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const activities = await storage.getAllActivities();
+      res.json(activities.slice(0, limit));
+    } catch (error) {
+      console.error("Error fetching activities:", error);
+      res.status(500).json({ error: "Failed to fetch activities" });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}
+```
+
+---
+
+## Frontend Application Structure
+
+### `client/src/App.tsx` - Main App Component
+```typescript
+import { useState } from "react";
+import { queryClient } from "./lib/queryClient";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import MapPage from "@/pages/map";
+import Profile from "@/pages/profile";
+import Menu from "@/pages/menu";
+import BottomNavigation from "@/components/bottom-navigation";
+import { Leaf } from "lucide-react";
+
+function App() {
+  const [activeSection, setActiveSection] = useState<'map' | 'profile' | 'menu'>('map');
+
+  const renderActiveSection = () => {
+    switch (activeSection) {
+      case 'map':
+        return <MapPage />;
+      case 'profile':
+        return <Profile />;
+      case 'menu':
+        return <Menu />;
+      default:
+        return <MapPage />;
+    }
+  };
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <div className="h-screen flex flex-col overflow-hidden">
+          {/* Header */}
+          <header className="bg-card shadow-lg border-b border-border z-50 relative">
+            <div className="px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 eco-gradient rounded-full flex items-center justify-center">
+                  <Leaf className="text-white" size={20} />
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold text-foreground">CleanSweden</h1>
+                  <p className="text-xs text-muted-foreground">Making Sweden Cleaner Together</p>
+                </div>
+              </div>
+              
+              <div className="flex items-center space-x-2 bg-muted rounded-full px-3 py-1">
+                <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center">
+                  <Leaf className="text-primary-foreground" size={12} />
+                </div>
+                <span className="text-sm font-medium">Erik Larsson</span>
+                <span className="text-xs text-muted-foreground">1,247 pts</span>
+              </div>
+            </div>
+          </header>
+
+          {/* Main Content */}
+          <div className="flex-1 relative overflow-hidden">
+            {renderActiveSection()}
+          </div>
+
+          {/* Bottom Navigation */}
+          <BottomNavigation 
+            activeSection={activeSection} 
+            onSectionChange={setActiveSection}
+          />
+        </div>
+        
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
+```
+
+### `client/src/components/bottom-navigation.tsx` - Navigation Bar
+```typescript
+import { Map, User, Menu } from "lucide-react";
+
+interface BottomNavigationProps {
+  activeSection: 'map' | 'profile' | 'menu';
+  onSectionChange: (section: 'map' | 'profile' | 'menu') => void;
+}
+
+export default function BottomNavigation({ activeSection, onSectionChange }: BottomNavigationProps) {
+  const navItems = [
+    { id: 'map' as const, icon: Map, label: 'Map' },
+    { id: 'profile' as const, icon: User, label: 'Profile' },
+    { id: 'menu' as const, icon: Menu, label: 'Menu' },
+  ];
+
+  return (
+    <div className="bg-card border-t border-border px-4 py-2">
+      <div className="flex justify-around items-center max-w-md mx-auto">
+        {navItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = activeSection === item.id;
+          
+          return (
+            <button
+              key={item.id}
+              onClick={() => onSectionChange(item.id)}
+              className={`flex flex-col items-center p-3 rounded-lg transition-colors ${
+                isActive 
+                  ? 'text-primary bg-primary/10' 
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+              data-testid={`nav-${item.id}`}
+            >
+              <Icon size={20} />
+              <span className="text-xs font-medium mt-1">{item.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## Map Components
+
+### `client/src/pages/map.tsx` - Main Map Page
+```typescript
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { type CityWithRank } from "@shared/schema";
+import InteractiveMap from "@/components/interactive-map";
+import PersonalMap from "@/components/personal-map";
+import CityDetailModal from "@/components/city-detail-modal";
+import AddPointsModal from "@/components/add-points-modal";
+import CameraModal from "@/components/camera-modal";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Camera, Info, Expand, Crosshair, Globe, User } from "lucide-react";
+
+export default function MapPage() {
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
+  const [showAddPoints, setShowAddPoints] = useState(false);
+  const [showCamera, setShowCamera] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
+  const [capturedPhoto, setCapturedPhoto] = useState<File | null>(null);
+  const [mapMode, setMapMode] = useState<'overview' | 'personal'>('overview');
+
+  const { data: cities = [], refetch: refetchCities } = useQuery<CityWithRank[]>({
+    queryKey: ["/api/cities"],
+  });
+
+  const selectedCity = cities.find(city => city.id === selectedCityId);
+
+  const handleCitySelect = (cityId: string) => {
+    setSelectedCityId(cityId);
+  };
+
+  const handleCloseModal = () => {
+    setSelectedCityId(null);
+  };
+
+  const handleShowAddPoints = () => {
+    setShowAddPoints(true);
+  };
+
+  const handleShowCamera = () => {
+    setShowCamera(true);
+  };
+
+  const handleCameraCapture = (file: File) => {
+    setCapturedPhoto(file);
+    setShowCamera(false);
+    setShowAddPoints(true);
+  };
+
+  const handleCloseAddPoints = () => {
+    setShowAddPoints(false);
+  };
+
+  const handleActivityAdded = () => {
+    refetchCities();
+    setShowAddPoints(false);
+  };
+
+  const handleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen();
+    }
+  };
+
+  const handleCenterMap = () => {
+    console.log("Center map on Sweden");
+  };
+
+  return (
+    <div className="h-full relative">
+      {/* Map Mode Toggle */}
+      <div className="absolute top-4 right-4 z-50 bg-card/80 backdrop-blur-lg rounded-full p-1 shadow-lg">
+        <div className="flex space-x-1">
+          <Button
+            size="sm"
+            variant={mapMode === 'overview' ? 'default' : 'ghost'}
+            onClick={() => setMapMode('overview')}
+            className={`rounded-full text-xs ${
+              mapMode === 'overview' 
+                ? 'bg-primary text-primary-foreground' 
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            data-testid="button-overview-map"
+          >
+            <Globe size={14} className="mr-1" />
+            Cities
+          </Button>
+          <Button
+            size="sm"
+            variant={mapMode === 'personal' ? 'default' : 'ghost'}
+            onClick={() => setMapMode('personal')}
+            className={`rounded-full text-xs ${
+              mapMode === 'personal' 
+                ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white' 
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            data-testid="button-personal-map"
+          >
+            <User size={14} className="mr-1" />
+            Personal
+          </Button>
+        </div>
+      </div>
+
+      {/* Conditional Map Rendering */}
+      {mapMode === 'overview' ? (
+        <InteractiveMap 
+          cities={cities} 
+          onCitySelect={handleCitySelect}
+          showLegend={showLegend}
+        />
+      ) : (
+        <PersonalMap onPhotoTaken={() => console.log('Photo taken!')} />
+      )}
+      
+      {/* Map Controls - Only show for overview mode */}
+      {mapMode === 'overview' && (
+        <>
+          <div className="absolute top-4 left-4 flex flex-col space-y-2 z-40">
+            <Button
+              variant="outline"
+              size="icon"
+              className="w-10 h-10 bg-card text-muted-foreground rounded-full shadow-lg hover:bg-muted"
+              onClick={handleFullscreen}
+              data-testid="button-fullscreen"
+            >
+              <Expand size={16} />
+            </Button>
+            
+            <Button
+              variant="outline"
+              size="icon"
+              className="w-10 h-10 bg-card text-muted-foreground rounded-full shadow-lg hover:bg-muted"
+              onClick={handleCenterMap}
+              data-testid="button-center-map"
+            >
+              <Crosshair size={16} />
+            </Button>
+            
+            <Button
+              variant="outline"
+              size="icon"
+              className="w-10 h-10 bg-card text-muted-foreground rounded-full shadow-lg hover:bg-muted"
+              onClick={() => setShowLegend(!showLegend)}
+              data-testid="button-toggle-legend"
+            >
+              <Info size={16} />
+            </Button>
+          </div>
+
+          {/* Camera/Add Points Button for overview mode */}
+          <div className="absolute bottom-20 right-4 z-40">
+            <Button
+              className="w-16 h-16 eco-gradient text-white rounded-full shadow-xl hover:shadow-2xl transition-all transform hover:scale-105"
+              onClick={handleShowCamera}
+              data-testid="button-camera-cleanup"
+            >
+              <Camera size={24} />
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* Modals */}
+      {selectedCity && (
+        <CityDetailModal
+          city={selectedCity}
+          onClose={handleCloseModal}
+          onAddPoints={handleShowAddPoints}
+        />
+      )}
+
+      {showCamera && (
+        <CameraModal
+          isOpen={showCamera}
+          onClose={() => setShowCamera(false)}
+          onCapture={handleCameraCapture}
+        />
+      )}
+
+      {showAddPoints && (
+        <AddPointsModal
+          cities={cities}
+          selectedCityId={selectedCityId}
+          onClose={handleCloseAddPoints}
+          onSuccess={handleActivityAdded}
+          preselectedPhoto={capturedPhoto}
+        />
+      )}
+    </div>
+  );
+}
+```
+
+### `client/src/components/interactive-map.tsx` - Cities Overview Map
+```typescript
+import { useEffect, useRef } from "react";
+import { type CityWithRank } from "@shared/schema";
+import { getCityMarkerClass } from "@/lib/swedish-cities";
+
+declare global {
+  interface Window {
+    L: any;
+    selectCity: (cityId: string) => void;
+  }
+}
+
+interface InteractiveMapProps {
+  cities: CityWithRank[];
+  onCitySelect: (cityId: string) => void;
+  showLegend: boolean;
+}
+
+export default function InteractiveMap({ cities, onCitySelect, showLegend }: InteractiveMapProps) {
+  const mapRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const markersRef = useRef<any[]>([]);
+
+  useEffect(() => {
+    // Set up global city selection function
+    window.selectCity = (cityId: string) => {
+      onCitySelect(cityId);
+    };
+    
+    // Load Leaflet dynamically
+    if (!window.L) {
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.onload = initializeMap;
+      document.head.appendChild(script);
+    } else {
+      initializeMap();
+    }
+
+    // Cleanup function
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (mapInstanceRef.current && cities.length > 0) {
+      updateMarkers();
+    }
+  }, [cities]);
+
+  const initializeMap = () => {
+    if (!mapRef.current || !window.L || mapInstanceRef.current) return;
+
+    // Initialize map centered on Sweden
+    const map = window.L.map(mapRef.current).setView([62.0, 15.0], 5);
+
+    // Add tile layer
+    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    mapInstanceRef.current = map;
+    
+    if (cities.length > 0) {
+      updateMarkers();
+    }
+  };
+
+  const updateMarkers = () => {
+    if (!mapInstanceRef.current) return;
+
+    // Clear existing markers
+    markersRef.current.forEach(marker => {
+      mapInstanceRef.current.removeLayer(marker);
+    });
+    markersRef.current = [];
+
+    // Add new markers
+    cities.forEach(city => {
+      const markerClass = getCityMarkerClass(city.totalPoints);
+      
+      const customIcon = window.L.divIcon({
+        html: `
+          <div class="${markerClass} w-12 h-12 rounded-full flex items-center justify-center shadow-lg cursor-pointer hover:scale-110 transition-transform" onclick="window.selectCity('${city.id}')">
+            <span class="text-sm font-bold">${city.totalPoints}</span>
+          </div>
+          <div class="text-center mt-1">
+            <span class="text-xs font-medium bg-white px-2 py-1 rounded shadow">${city.name}</span>
+          </div>
+        `,
+        className: 'custom-city-marker',
+        iconSize: [48, 48],
+        iconAnchor: [24, 24],
+      });
+
+      const marker = window.L.marker([parseFloat(city.latitude), parseFloat(city.longitude)], {
+        icon: customIcon
+      }).addTo(mapInstanceRef.current);
+
+      marker.on('click', () => {
+        onCitySelect(city.id);
+      });
+
+      markersRef.current.push(marker);
+    });
+  };
+
+  return (
+    <div className="relative w-full h-full">
+      <div ref={mapRef} className="w-full h-full" data-testid="interactive-map" />
+      
+      {/* Map Legend */}
+      {showLegend && (
+        <div className="absolute top-4 left-4 bg-card rounded-lg shadow-lg p-4 z-40 glass-effect max-w-xs">
+          <h3 className="font-semibold mb-3 text-foreground">City Cleanliness Level</h3>
+          <div className="space-y-2">
+            <div className="flex items-center space-x-2">
+              <div className="w-4 h-4 city-marker-clean rounded-full"></div>
+              <span className="text-sm text-foreground">Very Clean (2000+ pts)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-4 h-4 city-marker-moderate rounded-full"></div>
+              <span className="text-sm text-foreground">Moderately Clean (1000-1999 pts)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-4 h-4 city-marker-needs-cleaning rounded-full"></div>
+              <span className="text-sm text-foreground">Needs Attention (0-999 pts)</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### `client/src/components/personal-map.tsx` - Personal GPS Tracking Map
+```typescript
+import { useState, useRef, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Camera, MapPin, Navigation, Zap, Star } from "lucide-react";
+import CameraModal from "@/components/camera-modal";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
+
+declare global {
+  interface Window {
+    L: any;
+  }
+}
+
+interface PersonalMapProps {
+  onPhotoTaken?: () => void;
+}
+
+export default function PersonalMap({ onPhotoTaken }: PersonalMapProps) {
+  const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const [trackingEnabled, setTrackingEnabled] = useState(false);
+  const [nearbyCleanupSpots, setNearbyCleanupSpots] = useState<any[]>([]);
+  const mapRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const userMarkerRef = useRef<any>(null);
+  const watchIdRef = useRef<number | null>(null);
+  
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    // Load Leaflet and initialize map
+    if (!window.L) {
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.onload = initializePersonalMap;
+      document.head.appendChild(script);
+    } else {
+      initializePersonalMap();
+    }
+
+    return () => {
+      if (watchIdRef.current) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
+  const initializePersonalMap = () => {
+    if (!mapRef.current || !window.L || mapInstanceRef.current) return;
+
+    // Initialize map with a cool dark theme
+    const map = window.L.map(mapRef.current, {
+      zoomControl: false,
+      attributionControl: false
+    }).setView([59.3293, 18.0686], 13); // Start in Stockholm
+
+    // Add a vibrant tile layer with young people vibe
+    window.L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '© CartoDB'
+    }).addTo(map);
+
+    mapInstanceRef.current = map;
+    
+    // Add some fun cleanup hotspots
+    addCleanupHotspots();
+  };
+
+  const addCleanupHotspots = () => {
+    if (!mapInstanceRef.current) return;
+    
+    const hotspots = [
+      { lat: 59.3295, lng: 18.0700, type: 'park', points: 25 },
+      { lat: 59.3280, lng: 18.0650, type: 'street', points: 15 },
+      { lat: 59.3310, lng: 18.0720, type: 'beach', points: 35 },
+      { lat: 59.3270, lng: 18.0680, type: 'plaza', points: 20 },
+    ];
+
+    hotspots.forEach((spot, index) => {
+      const hotspotIcon = window.L.divIcon({
+        html: `
+          <div class="hotspot-marker animate-pulse">
+            <div class="w-8 h-8 bg-gradient-to-r from-pink-500 to-purple-500 rounded-full flex items-center justify-center shadow-lg hover:scale-110 transition-transform cursor-pointer">
+              <span class="text-white text-xs font-bold">+${spot.points}</span>
+            </div>
+          </div>
+        `,
+        className: 'custom-hotspot-marker',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+      });
+
+      window.L.marker([spot.lat, spot.lng], { icon: hotspotIcon })
+        .addTo(mapInstanceRef.current)
+        .bindPopup(`<div class="text-center p-2">
+          <p class="font-bold text-purple-600">${spot.type.charAt(0).toUpperCase() + spot.type.slice(1)} Cleanup</p>
+          <p class="text-sm">+${spot.points} points available!</p>
+        </div>`);
+    });
+  };
+
+  const startLocationTracking = () => {
+    if (!navigator.geolocation) {
+      toast({
+        title: "Location not supported",
+        description: "Your browser doesn't support location tracking",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 60000
+    };
+
+    // Get initial position
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        setUserLocation({ lat: latitude, lng: longitude });
+        updateUserLocationOnMap(latitude, longitude);
+        setTrackingEnabled(true);
+        
+        toast({
+          title: "Location found! 📍",
+          description: "You're now being tracked on the map",
+        });
+      },
+      (error) => {
+        console.error('Error getting location:', error);
+        toast({
+          title: "Location access denied",
+          description: "Please enable location permissions to track your position",
+          variant: "destructive",
+        });
+      },
+      options
+    );
+
+    // Watch position changes
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        setUserLocation({ lat: latitude, lng: longitude });
+        updateUserLocationOnMap(latitude, longitude);
+      },
+      (error) => console.error('Error watching location:', error),
+      options
+    );
+  };
+
+  const updateUserLocationOnMap = (lat: number, lng: number) => {
+    if (!mapInstanceRef.current) return;
+
+    // Remove existing user marker
+    if (userMarkerRef.current) {
+      mapInstanceRef.current.removeLayer(userMarkerRef.current);
+    }
+
+    // Create animated user marker with young vibe
+    const userIcon = window.L.divIcon({
+      html: `
+        <div class="user-location-marker">
+          <div class="w-12 h-12 bg-gradient-to-r from-cyan-400 via-purple-500 to-pink-500 rounded-full flex items-center justify-center shadow-2xl animate-pulse">
+            <div class="w-8 h-8 bg-white rounded-full flex items-center justify-center">
+              <div class="w-4 h-4 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full animate-ping"></div>
+            </div>
+          </div>
+          <div class="absolute -bottom-1 left-1/2 transform -translate-x-1/2">
+            <div class="w-3 h-3 bg-gradient-to-r from-cyan-400 to-purple-500 rotate-45"></div>
+          </div>
+        </div>
+      `,
+      className: 'user-marker',
+      iconSize: [48, 48],
+      iconAnchor: [24, 48],
+    });
+
+    userMarkerRef.current = window.L.marker([lat, lng], { icon: userIcon })
+      .addTo(mapInstanceRef.current)
+      .bindPopup(`
+        <div class="text-center p-2">
+          <p class="font-bold text-purple-600">You are here! 🎯</p>
+          <p class="text-sm">Ready to clean up?</p>
+        </div>
+      `);
+
+    // Center map on user location with smooth animation
+    mapInstanceRef.current.setView([lat, lng], 16, {
+      animate: true,
+      duration: 1
+    });
+  };
+
+  const handleCameraCapture = async (file: File) => {
+    if (!userLocation) {
+      toast({
+        title: "Location needed",
+        description: "Please enable location tracking to take photos",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Here you could save the photo with location data
+    toast({
+      title: "Photo captured! 📸",
+      description: `Photo taken at ${userLocation.lat.toFixed(4)}, ${userLocation.lng.toFixed(4)}`,
+    });
+    
+    if (onPhotoTaken) {
+      onPhotoTaken();
+    }
+  };
+
+  return (
+    <div className="h-full relative overflow-hidden">
+      {/* Personal Map */}
+      <div ref={mapRef} className="w-full h-full" data-testid="personal-map" />
+      
+      {/* Floating Controls with Young Vibe */}
+      <div className="absolute top-4 left-4 space-y-3 z-40">
+        {/* Location Toggle */}
+        <Button
+          onClick={startLocationTracking}
+          disabled={trackingEnabled}
+          className={`rounded-full shadow-xl transition-all transform hover:scale-105 ${
+            trackingEnabled 
+              ? 'bg-gradient-to-r from-green-400 to-blue-500 text-white' 
+              : 'bg-gradient-to-r from-purple-500 to-pink-500 text-white hover:from-purple-600 hover:to-pink-600'
+          }`}
+          data-testid="button-start-tracking"
+        >
+          <Navigation className="mr-2" size={16} />
+          {trackingEnabled ? 'Tracking!' : 'Find Me'}
+        </Button>
+        
+        {/* Status Badge */}
+        {trackingEnabled && (
+          <Badge className="bg-gradient-to-r from-green-400 to-cyan-500 text-white animate-pulse">
+            <Zap className="mr-1" size={12} />
+            Live Tracking
+          </Badge>
+        )}
+      </div>
+
+      {/* Location Info */}
+      {userLocation && (
+        <div className="absolute top-4 right-4 bg-gradient-to-r from-purple-600/90 to-pink-600/90 backdrop-blur-lg rounded-2xl p-4 text-white shadow-xl z-40">
+          <div className="flex items-center space-x-2 mb-2">
+            <MapPin className="text-cyan-300" size={16} />
+            <span className="font-bold text-sm">Your Location</span>
+          </div>
+          <div className="text-xs opacity-90">
+            <p>Lat: {userLocation.lat.toFixed(4)}</p>
+            <p>Lng: {userLocation.lng.toFixed(4)}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Camera Button - Young & Fun Style */}
+      <div className="absolute bottom-6 right-6 z-40">
+        <div className="relative">
+          {/* Floating action button with gradient and glow */}
+          <Button
+            onClick={() => setShowCamera(true)}
+            disabled={!userLocation}
+            className={`w-20 h-20 rounded-full shadow-2xl transition-all transform hover:scale-110 active:scale-95 ${
+              userLocation 
+                ? 'bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 text-white' 
+                : 'bg-gray-400 text-gray-600 cursor-not-allowed'
+            }`}
+            data-testid="button-camera-personal"
+          >
+            <Camera size={28} />
+          </Button>
+          
+          {/* Pulsing ring effect */}
+          {userLocation && (
+            <div className="absolute inset-0 rounded-full bg-gradient-to-r from-pink-500 to-purple-500 opacity-30 animate-ping"></div>
+          )}
+          
+          {/* Status indicator */}
+          {userLocation && (
+            <Badge className="absolute -top-2 -right-2 bg-gradient-to-r from-green-400 to-cyan-500 text-white animate-bounce">
+              <Star size={12} />
+            </Badge>
+          )}
+        </div>
+        
+        <p className="text-center text-xs text-muted-foreground mt-2 font-medium">
+          {userLocation ? 'Snap & Clean!' : 'Enable Location'}
+        </p>
+      </div>
+
+      {/* Fun Motivational Messages */}
+      {trackingEnabled && (
+        <div className="absolute bottom-6 left-6 bg-gradient-to-r from-yellow-400/90 to-orange-500/90 backdrop-blur-lg rounded-2xl p-4 text-white shadow-xl z-40 max-w-xs">
+          <div className="flex items-center space-x-2 mb-1">
+            <Zap className="text-yellow-200" size={16} />
+            <span className="font-bold text-sm">Ready to Clean!</span>
+          </div>
+          <p className="text-xs opacity-90">
+            Look around for trash to pick up and snap a photo for points! 🌟
+          </p>
+        </div>
+      )}
+
+      {/* Camera Modal */}
+      <CameraModal
+        isOpen={showCamera}
+        onClose={() => setShowCamera(false)}
+        onCapture={handleCameraCapture}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+## Modal Components
+
+### `client/src/components/camera-modal.tsx` - Real Camera Functionality
+```typescript
+import { useState, useRef, useEffect } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { X, Camera, RotateCcw, Check, Upload } from "lucide-react";
+
+interface CameraModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onCapture: (file: File) => void;
+}
+
+export default function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      startCamera();
+    } else {
+      stopCamera();
+    }
+
+    return () => {
+      stopCamera();
+    };
+  }, [isOpen]);
+
+  const startCamera = async () => {
+    try {
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'environment' // Use back camera on mobile
+        } 
+      });
+      setStream(mediaStream);
+      setError(null);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+      }
+    } catch (err) {
+      console.error('Error accessing camera:', err);
+      setError('Could not access camera. Please check permissions or use file upload instead.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    if (context) {
+      context.drawImage(video, 0, 0);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const file = new File([blob], `cleanup-photo-${Date.now()}.jpg`, { type: 'image/jpeg' });
+          setCapturedPhoto(canvas.toDataURL());
+          onCapture(file);
+        }
+      }, 'image/jpeg', 0.8);
+    }
+  };
+
+  const retakePhoto = () => {
+    setCapturedPhoto(null);
+  };
+
+  const confirmPhoto = () => {
+    onClose();
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onCapture(file);
+      onClose();
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="max-w-md p-0 z-[9999]" data-testid="modal-camera">
+        <DialogHeader className="p-4 pb-0">
+          <DialogTitle>Take Photo</DialogTitle>
+          <Button
+            variant="outline"
+            size="icon"
+            className="absolute top-4 right-4"
+            onClick={onClose}
+            data-testid="button-close-camera"
+          >
+            <X size={16} />
+          </Button>
+        </DialogHeader>
+        
+        <div className="p-4">
+          {error ? (
+            <div className="text-center space-y-4">
+              <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                <p className="text-sm text-destructive">{error}</p>
+              </div>
+              
+              <div>
+                <label htmlFor="file-upload">
+                  <Button
+                    type="button"
+                    className="w-full cursor-pointer"
+                    data-testid="button-upload-instead"
+                  >
+                    <Upload className="mr-2" size={16} />
+                    Upload Photo Instead
+                  </Button>
+                </label>
+                <input
+                  id="file-upload"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                  data-testid="input-file-upload"
+                />
+              </div>
+            </div>
+          ) : capturedPhoto ? (
+            <div className="space-y-4">
+              <div className="relative">
+                <img 
+                  src={capturedPhoto} 
+                  alt="Captured photo" 
+                  className="w-full rounded-lg"
+                  data-testid="img-captured-photo"
+                />
+              </div>
+              
+              <div className="flex space-x-2">
+                <Button
+                  variant="outline"
+                  onClick={retakePhoto}
+                  className="flex-1"
+                  data-testid="button-retake-photo"
+                >
+                  <RotateCcw className="mr-2" size={16} />
+                  Retake
+                </Button>
+                <Button
+                  onClick={confirmPhoto}
+                  className="flex-1 eco-gradient text-white"
+                  data-testid="button-confirm-photo"
+                >
+                  <Check className="mr-2" size={16} />
+                  Use Photo
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="relative bg-black rounded-lg overflow-hidden">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-64 object-cover"
+                  data-testid="video-camera-preview"
+                />
+                <canvas
+                  ref={canvasRef}
+                  className="hidden"
+                />
+              </div>
+              
+              <div className="flex space-x-2">
+                <Button
+                  onClick={capturePhoto}
+                  className="flex-1 eco-gradient text-white"
+                  data-testid="button-capture-photo"
+                >
+                  <Camera className="mr-2" size={16} />
+                  Capture Photo
+                </Button>
+                
+                <label htmlFor="file-upload-alt">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="cursor-pointer"
+                    data-testid="button-upload-file"
+                  >
+                    <Upload size={16} />
+                  </Button>
+                </label>
+                <input
+                  id="file-upload-alt"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                  data-testid="input-file-upload-alt"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+---
+
+## Profile & Menu Pages
+
+### `client/src/pages/profile.tsx` - User Profile with Stats
+```typescript
+import { useQuery } from "@tanstack/react-query";
+import { type CityWithRank } from "@shared/schema";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Leaf, Trophy, Camera, Calendar, Target } from "lucide-react";
+
+export default function Profile() {
+  const { data: cities = [] } = useQuery<CityWithRank[]>({
+    queryKey: ["/api/cities"],
+  });
+
+  // Mock user data - in real app this would come from authentication
+  const user = {
+    name: "Erik Larsson",
+    totalPoints: 1247,
+    activitiesCount: 23,
+    citiesHelped: 5,
+    joinDate: "2024-11-15",
+    rank: 12,
+  };
+
+  const achievements = [
+    { id: 1, name: "Eco Warrior", description: "Completed 20+ cleanup activities", icon: "🌱", earned: true },
+    { id: 2, name: "Photo Pro", description: "Uploaded 10+ photos", icon: "📷", earned: true },
+    { id: 3, name: "City Champion", description: "Top contributor in any city", icon: "👑", earned: false },
+    { id: 4, name: "Marathon Cleaner", description: "50+ cleanup activities", icon: "🏃‍♂️", earned: false },
+    { id: 5, name: "Sweden Savior", description: "Helped all 8 cities", icon: "🇸🇪", earned: false },
+  ];
+
+  const getNextLevelPoints = () => {
+    const levels = [0, 500, 1000, 2000, 5000, 10000];
+    const currentLevel = levels.findIndex(level => user.totalPoints < level);
+    if (currentLevel === -1) return levels[levels.length - 1];
+    return levels[currentLevel];
+  };
+
+  const getCurrentLevelPoints = () => {
+    const levels = [0, 500, 1000, 2000, 5000, 10000];
+    const currentLevelIndex = levels.findIndex(level => user.totalPoints < level) - 1;
+    if (currentLevelIndex < 0) return 0;
+    return levels[currentLevelIndex];
+  };
+
+  const nextLevel = getNextLevelPoints();
+  const currentLevel = getCurrentLevelPoints();
+  const progressToNext = ((user.totalPoints - currentLevel) / (nextLevel - currentLevel)) * 100;
+
+  return (
+    <div className="h-full overflow-y-auto p-4 space-y-6">
+      {/* User Profile Header */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center space-x-4">
+            <Avatar className="w-16 h-16">
+              <AvatarFallback className="bg-primary text-primary-foreground text-xl font-bold">
+                {user.name.split(' ').map(n => n[0]).join('')}
+              </AvatarFallback>
+            </Avatar>
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold text-foreground" data-testid="text-user-name">{user.name}</h2>
+              <p className="text-muted-foreground">Member since {new Date(user.joinDate).toLocaleDateString()}</p>
+              <div className="flex items-center space-x-4 mt-2">
+                <Badge variant="outline" className="text-primary border-primary">
+                  Rank #{user.rank}
+                </Badge>
+                <span className="text-sm text-muted-foreground">{user.activitiesCount} activities</span>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Points and Progress */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <Trophy className="text-primary" size={20} />
+            <span>Your Impact</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="text-center">
+            <div className="text-4xl font-bold text-primary" data-testid="text-total-points">{user.totalPoints}</div>
+            <div className="text-sm text-muted-foreground">Total Points Earned</div>
+          </div>
+          
+          <div>
+            <div className="flex justify-between text-sm mb-2">
+              <span>Level Progress</span>
+              <span>{user.totalPoints} / {nextLevel}</span>
+            </div>
+            <Progress value={progressToNext} className="h-2" />
+            <p className="text-xs text-muted-foreground mt-1">
+              {nextLevel - user.totalPoints} points to next level
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4 text-center">
+            <div>
+              <div className="text-2xl font-bold text-secondary">{user.activitiesCount}</div>
+              <div className="text-xs text-muted-foreground">Activities</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-accent">{user.citiesHelped}</div>
+              <div className="text-xs text-muted-foreground">Cities Helped</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-primary">{user.rank}</div>
+              <div className="text-xs text-muted-foreground">National Rank</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Achievements */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <Target className="text-accent" size={20} />
+            <span>Achievements</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-3">
+            {achievements.map((achievement) => (
+              <div 
+                key={achievement.id}
+                className={`p-3 rounded-lg border text-center ${
+                  achievement.earned 
+                    ? 'bg-primary/10 border-primary/20' 
+                    : 'bg-muted/50 border-border opacity-50'
+                }`}
+                data-testid={`achievement-${achievement.id}`}
+              >
+                <div className="text-2xl mb-1">{achievement.icon}</div>
+                <div className={`font-medium text-sm ${
+                  achievement.earned ? 'text-primary' : 'text-muted-foreground'
+                }`}>
+                  {achievement.name}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {achievement.description}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Recent Activity Summary */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <Calendar className="text-secondary" size={20} />
+            <span>Recent Activity</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-center py-4">
+            <Leaf className="text-primary mx-auto mb-2" size={32} />
+            <p className="text-muted-foreground">Last cleanup activity</p>
+            <p className="font-medium">2 hours ago in Stockholm</p>
+            <Badge variant="outline" className="mt-2">+25 points</Badge>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+```
+
+---
+
+## Styling & Theme
+
+### `client/src/index.css` - Custom Styles & Animations
+```css
+@import url('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: hsl(120 20% 96%);
+  --foreground: hsl(120 20% 8%);
+  --card: hsl(120 20% 100%);
+  --card-foreground: hsl(120 20% 8%);
+  --popover: hsl(120 20% 100%);
+  --popover-foreground: hsl(120 20% 8%);
+  --primary: hsl(142 76% 36%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(210 100% 50%);
+  --secondary-foreground: hsl(0 0% 100%);
+  --muted: hsl(120 20% 88%);
+  --muted-foreground: hsl(120 20% 40%);
+  --accent: hsl(142 86% 28%);
+  --accent-foreground: hsl(0 0% 100%);
+  --destructive: hsl(0 84% 60%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --border: hsl(120 20% 88%);
+  --input: hsl(120 20% 88%);
+  --ring: hsl(142 76% 36%);
+  --radius: 0.5rem;
+  --font-sans: 'Inter', sans-serif;
+}
+
+.dark {
+  --background: hsl(120 20% 4%);
+  --foreground: hsl(120 20% 92%);
+  --card: hsl(120 20% 8%);
+  --card-foreground: hsl(120 20% 92%);
+  --popover: hsl(120 20% 8%);
+  --popover-foreground: hsl(120 20% 92%);
+  --primary: hsl(142 76% 36%);
+  --primary-foreground: hsl(0 0% 100%);
+  --secondary: hsl(210 100% 50%);
+  --secondary-foreground: hsl(0 0% 100%);
+  --muted: hsl(120 20% 12%);
+  --muted-foreground: hsl(120 20% 60%);
+  --accent: hsl(142 86% 28%);
+  --accent-foreground: hsl(0 0% 100%);
+  --destructive: hsl(0 84% 60%);
+  --destructive-foreground: hsl(0 0% 100%);
+  --border: hsl(120 20% 12%);
+  --input: hsl(120 20% 12%);
+  --ring: hsl(142 76% 36%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+@layer components {
+  .leaflet-container {
+    height: 100%;
+    width: 100%;
+  }
+  
+  .city-marker-clean {
+    background: hsl(142 76% 36%);
+    color: white;
+  }
+  
+  .city-marker-moderate {
+    background: hsl(45 100% 51%);
+    color: white;
+  }
+  
+  .city-marker-needs-cleaning {
+    background: hsl(0 84% 60%);
+    color: white;
+  }
+  
+  .eco-gradient {
+    background: linear-gradient(135deg, hsl(142 76% 36%) 0%, hsl(210 100% 50%) 100%);
+  }
+  
+  .glass-effect {
+    backdrop-filter: blur(10px);
+    background-color: hsla(120, 20%, 100%, 0.8);
+  }
+  
+  .animate-pulse-slow {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  .sidebar-slide {
+    transform: translateX(100%);
+    transition: transform 0.3s ease-in-out;
+  }
+  
+  .sidebar-slide.open {
+    transform: translateX(0);
+  }
+  
+  /* Personal Map Young Vibe Styles */
+  .user-location-marker {
+    position: relative;
+  }
+  
+  .hotspot-marker {
+    position: relative;
+  }
+  
+  @keyframes bounce-slow {
+    0%, 20%, 50%, 80%, 100% {
+      transform: translateY(0);
+    }
+    40% {
+      transform: translateY(-10px);
+    }
+    60% {
+      transform: translateY(-5px);
+    }
+  }
+  
+  .animate-bounce-slow {
+    animation: bounce-slow 2s infinite;
+  }
+  
+  @keyframes glow {
+    0% {
+      box-shadow: 0 0 5px rgba(147, 51, 234, 0.5);
+    }
+    50% {
+      box-shadow: 0 0 20px rgba(147, 51, 234, 0.8), 0 0 30px rgba(236, 72, 153, 0.6);
+    }
+    100% {
+      box-shadow: 0 0 5px rgba(147, 51, 234, 0.5);
+    }
+  }
+  
+  .glow-effect {
+    animation: glow 2s ease-in-out infinite alternate;
+  }
+  
+  /* Ensure dialogs appear above map layers */
+  [data-radix-popper-content-wrapper] {
+    z-index: 9999 !important;
+  }
+  
+  [role="dialog"] {
+    z-index: 9999 !important;
+  }
+  
+  .leaflet-popup {
+    z-index: 9998 !important;
+  }
+  
+  .leaflet-control-container {
+    z-index: 9997 !important;
+  }
+}
+```
+
+---
+
+## Utility Functions
+
+### `client/src/lib/swedish-cities.ts` - City Helpers
+```typescript
+export const swedishCities = [
+  { name: "Stockholm", region: "Stockholm County", latitude: 59.3293, longitude: 18.0686 },
+  { name: "Gothenburg", region: "Västra Götaland County", latitude: 57.7089, longitude: 11.9746 },
+  { name: "Malmö", region: "Skåne County", latitude: 55.6050, longitude: 13.0038 },
+  { name: "Uppsala", region: "Uppsala County", latitude: 59.8586, longitude: 17.6389 },
+  { name: "Västerås", region: "Västmanland County", latitude: 59.6162, longitude: 16.5528 },
+  { name: "Örebro", region: "Örebro County", latitude: 59.2741, longitude: 15.2066 },
+  { name: "Linköping", region: "Östergötland County", latitude: 58.4108, longitude: 15.6214 },
+  { name: "Helsingborg", region: "Skåne County", latitude: 56.0465, longitude: 12.6945 },
+];
+
+export function getCityCleanlinessLevel(points: number): 'clean' | 'moderate' | 'needs-cleaning' {
+  if (points >= 2000) return 'clean';
+  if (points >= 1000) return 'moderate';
+  return 'needs-cleaning';
+}
+
+export function getCityMarkerClass(points: number): string {
+  const level = getCityCleanlinessLevel(points);
+  return `city-marker-${level}`;
+}
+```
+
+---
+
+## Key Features Implemented
+
+### 🗺️ **Dual Map System**
+1. **Overview Map**: Shows all Swedish cities with color-coded markers based on cleanliness points
+2. **Personal Map**: GPS tracking with dark theme and vibrant gradients for young people appeal
+
+### 📱 **Real Camera Integration**
+- WebRTC camera access using device camera
+- Live video preview with capture/retake functionality
+- Fallback to file upload if camera unavailable
+- Photo confirmation workflow
+
+### 🏆 **Gamification System**
+- Point-based ranking system for cities
+- Real-time leaderboard updates
+- Achievement system with progress tracking
+- Personal profile with statistics
+
+### 🎨 **Young People Design**
+- Vibrant gradient colors (purple, pink, cyan)
+- Animated markers and buttons
+- Modern glass-morphism effects
+- Smooth transitions and hover effects
+
+### 📍 **GPS Features**
+- Real-time location tracking
+- Location-based photo taking
+- Animated user markers
+- Cleanup hotspot suggestions
+
+### 💾 **Data Management**
+- In-memory storage for development
+- Easy database migration capability
+- Type-safe API with Zod validation
+- Photo upload with 10MB limit
+
+---
+
+## Architecture Highlights
+
+- **Modular Design**: Separate components for maps, modals, and pages
+- **Type Safety**: Full TypeScript with Zod validation
+- **State Management**: TanStack Query for server state
+- **Responsive UI**: Mobile-first design with touch gestures
+- **Performance**: Efficient re-rendering and image optimization
+- **Accessibility**: Proper ARIA labels and keyboard navigation
